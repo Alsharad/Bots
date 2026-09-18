@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { parsePrice, detectCurrency } from "../../lib/price";
 import { normalizeAvailability } from "../../lib/availability";
 import { analyzeHtml } from "../../lib/detection";
@@ -12,7 +14,21 @@ describe("price parsing", () => {
   it("normalizes common formats into minor units", () => { expect(parsePrice("$12.99")).toBe(1299); expect(parsePrice("$1,299.00")).toBe(129900); expect(parsePrice("€ 1.299,95", "EUR")).toBe(129995); });
   it("detects currency", () => expect(detectCurrency("Only £19.95")).toBe("GBP"));
 });
-describe("availability", () => { it("normalizes schema values", () => { expect(normalizeAvailability("https://schema.org/InStock")).toBe("IN_STOCK"); expect(normalizeAvailability("SoldOut")).toBe("OUT_OF_STOCK"); expect(normalizeAvailability("PreOrder")).toBe("PREORDER"); }); });
+describe("availability", () => {
+  it("normalizes schema values", () => { expect(normalizeAvailability("https://schema.org/InStock")).toBe("IN_STOCK"); expect(normalizeAvailability("SoldOut")).toBe("OUT_OF_STOCK"); expect(normalizeAvailability("PreOrder")).toBe("PREORDER"); });
+  it("prefers explicit stock statements over pre-order mentions in titles", () => { expect(normalizeAvailability("Pre-Order Sony Bundle PlayStation 5 Pro In Stock")).toBe("IN_STOCK"); expect(normalizeAvailability("Pre-Order Sony Bundle Out of stock online")).toBe("OUT_OF_STOCK"); });
+  it("does not read a restock prompt as available", () => expect(normalizeAvailability("Notify me when back in stock")).toBe("OUT_OF_STOCK"));
+});
+const staticMetaPage = (badge: string) => readFileSync(join(__dirname, "../fixtures/static-meta-product.html"), "utf8").replace("STATUS_BADGE", badge);
+describe("availability inference", () => {
+  it("ignores stock phrases inside script data blobs", () => expect(analyzeHtml(staticMetaPage("In Stock"), "https://e.test/p")).toMatchObject({ availability: "IN_STOCK", priceMinor: 27890, currency: "KWD", detectionMethod: "META_TAG" }));
+  it("lets unambiguous visible text override static InStock metadata", () => expect(analyzeHtml(staticMetaPage("Out of stock online"), "https://e.test/p").availability).toBe("OUT_OF_STOCK"));
+  it("handles untranslated server-rendered status keys", () => { expect(analyzeHtml(staticMetaPage("pdp_product_outofstock_label"), "https://e.test/p").availability).toBe("OUT_OF_STOCK"); expect(analyzeHtml(staticMetaPage("pdp_product_inStock_label"), "https://e.test/p").availability).toBe("IN_STOCK"); });
+  it("keeps metadata when visible text is ambiguous", () => expect(analyzeHtml(staticMetaPage("In stock. Similar item: Out of stock"), "https://e.test/p").availability).toBe("IN_STOCK"));
+  it("honors an availability selector without a price selector", () => expect(analyzeHtml(staticMetaPage("Sold out"), "https://e.test/p", { availability: "span.typography-small" }).availability).toBe("OUT_OF_STOCK"));
+  it("honors explicit stock phrases", () => { expect(analyzeHtml(staticMetaPage("Ships in 2 days"), "https://e.test/p", { inStockText: "ships in" }).availability).toBe("IN_STOCK"); expect(analyzeHtml(staticMetaPage("Coming soon"), "https://e.test/p", { outOfStockText: "coming soon" }).availability).toBe("OUT_OF_STOCK"); });
+  it("still infers from plain page text when no metadata exists", () => expect(analyzeHtml("<body><h1>Drill</h1><p>Sold out</p></body>", "https://e.test/p").availability).toBe("OUT_OF_STOCK"));
+});
 describe("structured extraction", () => {
   it("extracts a JSON-LD product", () => { const result = analyzeHtml(`<script type="application/ld+json">{"@type":"Product","name":"Drill","image":"https://e.test/a.jpg","offers":{"@type":"Offer","price":"99.00","priceCurrency":"USD","availability":"https://schema.org/InStock"}}</script>`, "https://e.test/p"); expect(result).toMatchObject({ title: "Drill", priceMinor: 9900, availability: "IN_STOCK", detectionMethod: "JSON_LD" }); });
   it("extracts a numeric price from a nested PriceSpecification", () => {

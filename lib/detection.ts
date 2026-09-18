@@ -1,6 +1,6 @@
 import * as cheerio from "cheerio";
 import { Availability, DetectionMethod } from "@prisma/client";
-import { normalizeAvailability } from "./availability";
+import { availabilitySignals, normalizeAvailability } from "./availability";
 import { detectCurrency, parsePrice } from "./price";
 import type { DetectionResult } from "./types";
 
@@ -39,6 +39,45 @@ function findProducts(node: unknown, results: JsonObject[] = []): JsonObject[] {
   return results;
 }
 
+// Body text without script/style contents. Framework data blobs and i18n bundles routinely embed
+// every stock-status string a site can display, which makes the raw body text useless for inference.
+function visibleText($: cheerio.CheerioAPI): string {
+  const body = $("body").clone();
+  body.find("script, style, noscript, template").remove();
+  return body.text();
+}
+
+function metaAvailability($: cheerio.CheerioAPI): string | undefined {
+  return $('meta[property="product:availability"]').attr("content") ?? $('meta[itemprop="availability"]').attr("content")
+    ?? $('link[itemprop="availability"]').attr("href") ?? $('[itemprop="availability"]').first().attr("content");
+}
+
+// Order of trust: explicit selector, explicit stock phrases, then metadata cross-checked against the visible
+// page. Some storefronts ship static schema markup that always claims InStock, so unambiguous visible
+// out-of-stock text overrides a metadata claim of availability.
+function inferAvailability($: cheerio.CheerioAPI, selectors?: Record<string, string | undefined>): Availability {
+  if (selectors?.availability) {
+    const node = $(selectors.availability).first();
+    const explicit = normalizeAvailability(node.text().trim() || node.attr("content") || node.attr("href"));
+    if (explicit !== Availability.UNKNOWN) return explicit;
+  }
+  const visible = visibleText($);
+  const lowered = visible.toLowerCase();
+  if (selectors?.outOfStockText && lowered.includes(selectors.outOfStockText.toLowerCase())) return Availability.OUT_OF_STOCK;
+  if (selectors?.inStockText && lowered.includes(selectors.inStockText.toLowerCase())) return Availability.IN_STOCK;
+  return Availability.UNKNOWN;
+}
+
+function fallbackAvailability($: cheerio.CheerioAPI): Availability {
+  const visible = visibleText($);
+  const signals = availabilitySignals(visible);
+  const fromText = normalizeAvailability(visible);
+  const fromMeta = normalizeAvailability(metaAvailability($));
+  if (fromMeta === Availability.UNKNOWN) return fromText;
+  if (fromMeta !== Availability.OUT_OF_STOCK && signals.outOfStock && !signals.inStock) return Availability.OUT_OF_STOCK;
+  return fromMeta;
+}
+
 export function analyzeHtml(html: string, pageUrl: string, selectors?: Record<string, string | undefined>): DetectionResult {
   const $ = cheerio.load(html);
   const hostname = new URL(pageUrl).hostname;
@@ -46,13 +85,13 @@ export function analyzeHtml(html: string, pageUrl: string, selectors?: Record<st
   const prices: number[] = [];
   let result: DetectionResult = { availability: Availability.UNKNOWN, hostname, detectionMethod: DetectionMethod.HTML_TEXT, detectedPrices: prices, warnings };
   if (selectors?.variant) result.variantValue = $(selectors.variant).first().text().trim() || $(selectors.variant).first().attr("content") || undefined;
+  result.availability = inferAvailability($, selectors);
 
   if (selectors?.price) {
     const text = $(selectors.price).first().text();
     const currency = detectCurrency(text);
     result = { ...result, priceMinor: parsePrice(text, currency), currency, title: selectors.title ? $(selectors.title).first().text().trim() : undefined,
-      imageUrl: selectors.image ? $(selectors.image).first().attr("src") : undefined, availability: selectors.availability ? normalizeAvailability($(selectors.availability).first().text()) : Availability.UNKNOWN,
-      detectionMethod: DetectionMethod.CSS_SELECTOR };
+      imageUrl: selectors.image ? $(selectors.image).first().attr("src") : undefined, detectionMethod: DetectionMethod.CSS_SELECTOR };
   }
 
   if (result.priceMinor == null) {
@@ -71,7 +110,7 @@ export function analyzeHtml(html: string, pageUrl: string, selectors?: Record<st
         const regularPriceText = firstString(offers.highPrice) ?? firstString(specification?.highPrice);
         result = { ...result, title: firstString(product.name), imageUrl: firstString(product.image), priceMinor: priceText ? parsePrice(priceText, currency) : undefined,
           regularPriceMinor: regularPriceText ? parsePrice(regularPriceText, currency) : undefined,
-          currency, availability: normalizeAvailability(firstString(offers.availability)), detectionMethod: DetectionMethod.JSON_LD };
+          currency, availability: result.availability === Availability.UNKNOWN ? normalizeAvailability(firstString(offers.availability)) : result.availability, detectionMethod: DetectionMethod.JSON_LD };
         break;
       } catch { warnings.push("Invalid JSON-LD block ignored."); }
     }
@@ -85,7 +124,7 @@ export function analyzeHtml(html: string, pageUrl: string, selectors?: Record<st
 
   result.title ??= $('meta[property="og:title"]').attr("content") ?? ($("h1").first().text().trim() || undefined);
   result.imageUrl ??= $('meta[property="og:image"]').attr("content");
-  if (result.availability === Availability.UNKNOWN) result.availability = normalizeAvailability($('meta[property="product:availability"]').attr("content") ?? $("body").text());
+  if (result.availability === Availability.UNKNOWN) result.availability = fallbackAvailability($);
 
   const candidateTexts = $('[class*="price"], [id*="price"], [itemprop="price"]').toArray().slice(0, 30).map((node) => $(node).text().trim());
   for (const text of candidateTexts) {

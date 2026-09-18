@@ -91,7 +91,7 @@ export async function checkBot(id: string) {
   }
   try {
     const result = await fetchProduct(bot.url, { browserMode: bot.browserMode, waitForSelector: bot.waitForSelector ?? undefined, pageLoadDelayMs: bot.pageLoadDelayMs,
-      selectors: { price: bot.priceSelector ?? undefined, regularPrice: bot.regularPriceSelector ?? undefined, availability: bot.availabilitySelector ?? undefined, title: bot.titleSelector ?? undefined, image: bot.imageSelector ?? undefined, variant: bot.variantSelector ?? undefined } });
+      selectors: { price: bot.priceSelector ?? undefined, regularPrice: bot.regularPriceSelector ?? undefined, availability: bot.availabilitySelector ?? undefined, title: bot.titleSelector ?? undefined, image: bot.imageSelector ?? undefined, variant: bot.variantSelector ?? undefined, inStockText: bot.inStockText ?? undefined, outOfStockText: bot.outOfStockText ?? undefined } });
     const prior = bot.states[0] ?? null;
     const matching = await prisma.productState.count({ where: { botId: id, successful: true, confirmed: false, priceMinor: result.priceMinor, availability: result.availability } });
     const changed = Boolean(prior && (prior.priceMinor !== (result.priceMinor ?? null) || prior.availability !== result.availability));
