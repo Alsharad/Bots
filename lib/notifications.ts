@@ -7,7 +7,17 @@ export async function sendNotification(type: ChannelType, encrypted: string, mes
   const config = await decrypt<Config>(encrypted); let url = ""; const init: RequestInit = { method: "POST", headers: { "content-type": "application/json" } };
   if (type === "DISCORD") { url = String(config.webhookUrl); init.body = JSON.stringify({ content: message }); }
   else if (type === "GOTIFY") { url = `${String(config.serverUrl).replace(/\/$/, "")}/message?token=${encodeURIComponent(String(config.token))}`; init.body = JSON.stringify({ title: "Bots Alert", message, priority: Number(config.priority ?? 5) }); }
-  else if (type === "PUSHOVER") { url = "https://api.pushover.net/1/messages.json"; init.headers = { "content-type": "application/x-www-form-urlencoded" }; init.body = new URLSearchParams({ token: String(config.token), user: String(config.userKey), message }).toString(); }
+  else if (type === "PUSHOVER") {
+    url = "https://api.pushover.net/1/messages.json"; init.headers = { "content-type": "application/x-www-form-urlencoded" };
+    const params = new URLSearchParams({ token: String(config.token), user: String(config.userKey), title: "Bots Alert", message });
+    const priority = Math.max(-2, Math.min(2, Math.trunc(Number(config.priority) || 0)));
+    params.set("priority", String(priority));
+    // Emergency priority must carry retry/expire or Pushover rejects the message.
+    if (priority === 2) { params.set("retry", "60"); params.set("expire", "3600"); }
+    const sound = String(config.sound ?? "").trim();
+    if (sound) params.set("sound", sound);
+    init.body = params.toString();
+  }
   else if (type === "TELEGRAM") { url = `https://api.telegram.org/bot${String(config.botToken)}/sendMessage`; init.body = JSON.stringify({ chat_id: config.chatId, text: message }); }
   else if (type === "WEBHOOK") { url = String(config.url); init.method = String(config.method ?? "POST"); init.body = renderTemplate(String(config.bodyTemplate ?? '{"message":"{{message}}"}'), { message }); }
   else if (type === "SMTP") {

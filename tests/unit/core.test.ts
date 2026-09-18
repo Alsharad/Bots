@@ -67,3 +67,20 @@ describe("uptime monitors", () => {
     expect(result.success).toBe(true);
   });
 });
+describe("pushover", () => {
+  it("sends priority, sound, and emergency retry/expire", async () => {
+    const { encrypt } = await import("../../lib/crypto");
+    const { sendNotification } = await import("../../lib/notifications");
+    const calls: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => { calls.push(String(init?.body)); return new Response("{}", { status: 200 }); }) as typeof fetch;
+    try {
+      await sendNotification("PUSHOVER", await encrypt({ token: "t", userKey: "u", priority: "2", sound: "siren" }), "hi");
+      const params = new URLSearchParams(calls[0]);
+      expect(params.get("priority")).toBe("2"); expect(params.get("sound")).toBe("siren"); expect(params.get("retry")).toBe("60"); expect(params.get("expire")).toBe("3600"); expect(params.get("title")).toBe("Bots Alert");
+      await sendNotification("PUSHOVER", await encrypt({ token: "t", userKey: "u", priority: "" }), "hi");
+      const defaults = new URLSearchParams(calls[1]);
+      expect(defaults.get("priority")).toBe("0"); expect(defaults.has("sound")).toBe(false); expect(defaults.has("retry")).toBe(false);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+});
